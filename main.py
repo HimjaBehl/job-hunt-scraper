@@ -251,7 +251,7 @@ Your task: Analyze fit and generate outreach. Respond ONLY with a valid JSON obj
         "content-type": "application/json",
     }
     body = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5",
         "max_tokens": 1000,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -259,8 +259,13 @@ Your task: Analyze fit and generate outreach. Respond ONLY with a valid JSON obj
     r = httpx.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=60)
     data = r.json()
     
+    if "error" in data:
+        raise ValueError(f"Anthropic API error: {data['error']}")
+    
+    if not data.get("content"):
+        raise ValueError(f"No content in response: {data}")
+    
     text = data["content"][0]["text"].strip()
-    # Strip any markdown fences
     text = text.replace("```json", "").replace("```", "").strip()
     
     parsed = json.loads(text)
