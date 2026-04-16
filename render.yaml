@@ -5,7 +5,7 @@ services:
     schedule: "0 7 * * *"   # Every day at 7am UTC (12:30pm IST)
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py both
-    rootDir: scraper
+    rootDir: .
     envVars:
       - key: APIFY_TOKEN
         sync: false
