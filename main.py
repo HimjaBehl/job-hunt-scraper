@@ -155,7 +155,7 @@ def scrape_linkedin_jobs() -> list[dict]:
     results = run_apify_actor(
         "curious_coder~linkedin-jobs-scraper",
         {
-            "startUrls": LINKEDIN_SEARCH_URLS,
+            "urls": LINKEDIN_SEARCH_URLS,
             "scrapeCompany": True,
             "count": 25,
             "proxy": {"useApifyProxy": True},
