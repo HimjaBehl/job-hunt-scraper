@@ -94,6 +94,19 @@ def supabase_get_unanalyzed() -> list[dict]:
     r = httpx.get(url, headers=headers, timeout=30)
     return r.json()
 
+def supabase_get_feedback() -> list[dict]:
+    """Get recent skip/apply feedback to inform scoring."""
+    url = f"{SUPABASE_URL}/rest/v1/feedback?select=decision,reason,job_title,company&order=created_at.desc&limit=30"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    try:
+        r = httpx.get(url, headers=headers, timeout=30)
+        return r.json() if r.text else []
+    except:
+        return []
+
 # ── Apify scraper ─────────────────────────────────────────────────────────────
 def run_apify_actor(actor_id: str, input_data: dict) -> list[dict]:
     """Run an Apify actor and return results."""
@@ -146,6 +159,33 @@ LINKEDIN_SEARCH_URLS = [
     "https://www.linkedin.com/jobs/search/?keywords=founding%20team%20generalist&location=India&position=1&pageNum=0",
     "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&location=Dubai&position=1&pageNum=0",
     "https://www.linkedin.com/jobs/search/?keywords=chief%20of%20staff&location=Dubai&position=1&pageNum=0",
+    # Roles that explicitly want AI-native operators (any industry)
+    "https://www.linkedin.com/jobs/search/?keywords=generalist+AI+tools+startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=operations+%22AI+tools%22+startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founder+office+%22AI%22+generalist&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=chief+of+staff+%22AI%22+startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=strategy+operations+%22AI-first%22&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=entrepreneur+in+residence+startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founding+team+operator+startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=0+to+1+generalist+startup&location=India&position=1&pageNum=0",
+]
+
+# Titles to exclude — roles that are not a fit
+BLOCKED_TITLE_KEYWORDS = [
+    "executive assistant",
+    "personal assistant",
+    "administrative assistant",
+    "admin assistant",
+    "ea to",
+    "pa to",
+    "virtual assistant",
+    "receptionist",
+    "secretary",
+    "data entry",
+    "customer support",
+    "customer service",
+    "telecaller",
+    "back office",
 ]
 
 def scrape_linkedin_jobs() -> list[dict]:
@@ -198,6 +238,11 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
     if not title or not company or not url:
         return None
     
+    # Block irrelevant role types
+    title_lower = title.lower()
+    if any(blocked in title_lower for blocked in BLOCKED_TITLE_KEYWORDS):
+        return None
+    
     return {
         "title": title[:500],
         "company": company[:200],
@@ -210,7 +255,7 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
         "status": "new",
     }
 # ── Claude analyzer ───────────────────────────────────────────────────────────
-def analyze_job_with_claude(job: dict) -> dict:
+def analyze_job_with_claude(job: dict, feedback_context: str = "") -> dict:
     """Use Claude to analyze fit and generate outreach for a job."""
     
     jd_raw = job.get("jd_text") or ""
@@ -219,11 +264,18 @@ def analyze_job_with_claude(job: dict) -> dict:
     else:
         jd_snippet = str(jd_raw)[:3000]
     
+    feedback_section = f"""
+HIMJA'S PAST FEEDBACK (learn from these patterns):
+{feedback_context}
+
+Use this to calibrate scoring — if she's been skipping roles for a specific reason, weight that heavily.
+""" if feedback_context else ""
+    
     prompt = f"""You are analyzing a job opportunity for Himja Behl.
 
 CANDIDATE PROFILE:
 {HIMJA_PROFILE}
-
+{feedback_section}
 JOB DETAILS:
 Title: {job['title']}
 Company: {job['company']}
@@ -234,6 +286,14 @@ JOB DESCRIPTION:
 {jd_snippet if jd_snippet else "No JD available - analyze based on title and company only"}
 
 Your task: Analyze fit and generate outreach. Respond ONLY with a valid JSON object, no markdown, no preamble.
+
+Scoring guidance:
+- Score 9-10: JD explicitly mentions wanting someone who uses AI tools, builds with AI, is AI-native, or values automation/AI fluency — AND the role matches Himja's operator background
+- Score 7-8: Strong operator role at a tech/startup; JD doesn't mention AI explicitly but the org is clearly fast-moving and would value an AI-native operator
+- Score 5-6: Relevant title and industry but no signal of AI-native culture or the role is more execution-heavy with less strategic scope
+- Score 3-4: Title matches but wrong seniority, wrong function, or the org seems traditional/slow-moving
+- Score 1-2: Poor fit — admin-heavy, support role, or irrelevant industry
+- Key: The AI-native signal comes from the JD language, NOT from whether the company is an AI company. A fintech, D2C brand, or SaaS that wants someone who "uses AI to move faster" is exactly right.
 
 {{
   "fit_score": <integer 1-10, where 10 = perfect match>,
@@ -313,11 +373,23 @@ def run_analyze():
     jobs = supabase_get_unanalyzed()
     print(f"Found {len(jobs)} jobs to analyze")
     
+    # Build feedback context from past decisions
+    raw_feedback = supabase_get_feedback()
+    feedback_context = ""
+    if raw_feedback:
+        skips = [f"- Skipped '{f['job_title']}' @ {f['company']}: {f['reason']}" 
+                 for f in raw_feedback if f.get('decision') == 'skipped' and f.get('reason')]
+        applies = [f"- Applied to '{f['job_title']}' @ {f['company']}: {f['reason']}" 
+                   for f in raw_feedback if f.get('decision') == 'applied' and f.get('reason')]
+        if skips or applies:
+            feedback_context = "\n".join(skips[:15] + applies[:10])
+            print(f"  Using {len(skips)} skip signals + {len(applies)} apply signals")
+    
     analyzed = 0
     for job in jobs:
         try:
             print(f"  Analyzing: {job['title']} @ {job['company']}")
-            analysis = analyze_job_with_claude(job)
+            analysis = analyze_job_with_claude(job, feedback_context)
             
             supabase_update(job["id"], {
                 "fit_score": analysis.get("fit_score"),
@@ -330,10 +402,9 @@ def run_analyze():
                 "analysis_done": True,
             })
             analyzed += 1
-            time.sleep(1)  # Rate limit
+            time.sleep(1)
         except Exception as e:
             print(f"  Error analyzing {job.get('title')}: {e}")
-            # Mark as done anyway to avoid infinite retry
             supabase_update(job["id"], {"analysis_done": True})
     
     print(f"Analyzed {analyzed} jobs")
