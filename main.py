@@ -135,34 +135,40 @@ def run_apify_actor(actor_id: str, input_data: dict) -> list[dict]:
     return results_r.json()
 
 def scrape_linkedin_jobs() -> list[dict]:
-    """Scrape LinkedIn jobs using Apify's LinkedIn Jobs Scraper."""
+    """Scrape LinkedIn jobs using Apify's bebity LinkedIn Jobs Scraper."""
     print("Scraping LinkedIn...")
     jobs = []
     
-    for query in SEARCH_QUERIES[:4]:  # Limit to avoid rate limits
+    # Use bebity~linkedin-jobs-scraper which accepts keywords + location directly
+    for query in SEARCH_QUERIES[:5]:
         for location in LOCATIONS[:3]:
             print(f"  Query: {query} @ {location}")
             results = run_apify_actor(
-                "curious_coder/linkedin-jobs-scraper",
+                "bebity~linkedin-jobs-scraper",
                 {
-                    "searchQueries": [{"query": query, "location": location}],
-                    "maxResults": 10,
+                    "keywords": query,
+                    "location": location,
+                    "maxResults": 15,
                     "proxy": {"useApifyProxy": True},
                 }
             )
             jobs.extend(results)
-            time.sleep(2)
+            time.sleep(3)
     
     return jobs
 
-def scrape_wellfound_jobs() -> list[dict]:
-    """Scrape Wellfound/AngelList jobs."""
-    print("Scraping Wellfound...")
+def scrape_naukri_jobs() -> list[dict]:
+    """Scrape Naukri jobs using Apify."""
+    print("Scraping Naukri...")
     results = run_apify_actor(
-        "curious_coder/wellfound-scraper",
+        "curious_coder~naukri-scraper",
         {
-            "searchKeywords": ["founder office", "chief of staff", "generalist"],
-            "locations": ["india", "dubai"],
+            "searchQueries": [
+                "founder office generalist",
+                "chief of staff startup",
+                "CEO office generalist",
+            ],
+            "locations": ["Bangalore", "Mumbai", "Delhi"],
             "maxResults": 30,
         }
     )
@@ -264,11 +270,11 @@ def run_scrape():
         print(f"LinkedIn scrape failed: {e}")
     
     try:
-        wf_jobs = scrape_wellfound_jobs()
-        all_raw.extend([(j, "wellfound") for j in wf_jobs])
-        print(f"Wellfound: {len(wf_jobs)} raw results")
+        naukri_jobs = scrape_naukri_jobs()
+        all_raw.extend([(j, "naukri") for j in naukri_jobs])
+        print(f"Naukri: {len(naukri_jobs)} raw results")
     except Exception as e:
-        print(f"Wellfound scrape failed: {e}")
+        print(f"Naukri scrape failed: {e}")
     
     # Normalize + deduplicate
     new_jobs = []
