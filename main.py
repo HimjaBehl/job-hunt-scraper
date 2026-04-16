@@ -189,7 +189,11 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
     url = (raw.get("url") or raw.get("jobUrl") or raw.get("link") or 
            raw.get("applyUrl") or "").strip()
     location = (raw.get("location") or raw.get("jobLocation") or "").strip()
-    jd = (raw.get("description") or raw.get("jobDescription") or raw.get("content") or "").strip()
+    jd_raw = raw.get("description") or raw.get("jobDescription") or raw.get("content") or ""
+    if isinstance(jd_raw, list):
+        jd = " ".join(str(x) for x in jd_raw).strip()
+    else:
+        jd = str(jd_raw).strip()
     
     if not title or not company or not url:
         return None
@@ -205,12 +209,15 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
         "analysis_done": False,
         "status": "new",
     }
-
 # ── Claude analyzer ───────────────────────────────────────────────────────────
 def analyze_job_with_claude(job: dict) -> dict:
     """Use Claude to analyze fit and generate outreach for a job."""
     
-    jd_snippet = (job.get("jd_text") or "")[:3000]
+    jd_raw = job.get("jd_text") or ""
+    if isinstance(jd_raw, list):
+        jd_snippet = " ".join(str(x) for x in jd_raw)[:3000]
+    else:
+        jd_snippet = str(jd_raw)[:3000]
     
     prompt = f"""You are analyzing a job opportunity for Himja Behl.
 
