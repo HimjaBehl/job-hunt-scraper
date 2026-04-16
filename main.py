@@ -86,7 +86,7 @@ def supabase_update(job_id: str, data: dict):
     httpx.patch(url, headers=headers, json=data, timeout=30)
 
 def supabase_get_unanalyzed() -> list[dict]:
-    url = f"{SUPABASE_URL}/rest/v1/jobs?analysis_done=eq.false&select=*&limit=20"
+    url = f"{SUPABASE_URL}/rest/v1/jobs?analysis_done=eq.false&select=*"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
