@@ -1,0 +1,17 @@
+services:
+  - type: cron
+    name: job-hunt-agent
+    runtime: python
+    schedule: "0 7 * * *"   # Every day at 7am UTC (12:30pm IST)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py both
+    rootDir: scraper
+    envVars:
+      - key: APIFY_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
