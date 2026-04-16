@@ -134,28 +134,35 @@ def run_apify_actor(actor_id: str, input_data: dict) -> list[dict]:
     )
     return results_r.json()
 
+LINKEDIN_SEARCH_URLS = [
+    # Founder's office / generalist roles in India
+    "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office%20generalist&location=Bangalore%2C%20India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office%20generalist&location=Mumbai%2C%20India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office%20generalist&location=Delhi%2C%20India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=chief%20of%20staff&location=Bangalore%2C%20India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=chief%20of%20staff&location=Mumbai%2C%20India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=chief%20of%20staff%20startup&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=CEO%20office%20generalist&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founding%20team%20generalist&location=India&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&location=Dubai&position=1&pageNum=0",
+    "https://www.linkedin.com/jobs/search/?keywords=chief%20of%20staff&location=Dubai&position=1&pageNum=0",
+]
+
 def scrape_linkedin_jobs() -> list[dict]:
-    """Scrape LinkedIn jobs using Apify's bebity LinkedIn Jobs Scraper."""
+    """Scrape LinkedIn jobs using curious_coder/linkedin-jobs-scraper (URL-based)."""
     print("Scraping LinkedIn...")
-    jobs = []
     
-    # Use bebity~linkedin-jobs-scraper which accepts keywords + location directly
-    for query in SEARCH_QUERIES[:5]:
-        for location in LOCATIONS[:3]:
-            print(f"  Query: {query} @ {location}")
-            results = run_apify_actor(
-                "bebity~linkedin-jobs-scraper",
-                {
-                    "keywords": query,
-                    "location": location,
-                    "maxResults": 15,
-                    "proxy": {"useApifyProxy": True},
-                }
-            )
-            jobs.extend(results)
-            time.sleep(3)
-    
-    return jobs
+    results = run_apify_actor(
+        "curious_coder~linkedin-jobs-scraper",
+        {
+            "startUrls": LINKEDIN_SEARCH_URLS,
+            "scrapeCompany": True,
+            "count": 25,
+            "proxy": {"useApifyProxy": True},
+        }
+    )
+    print(f"  Got {len(results)} raw results")
+    return results
 
 def scrape_naukri_jobs() -> list[dict]:
     """Scrape Naukri jobs using Apify."""
@@ -176,11 +183,13 @@ def scrape_naukri_jobs() -> list[dict]:
 
 def normalize_job(raw: dict, platform: str) -> dict | None:
     """Normalize raw job data from any platform into our schema."""
-    title = raw.get("title") or raw.get("jobTitle") or raw.get("position") or ""
-    company = raw.get("company") or raw.get("companyName") or raw.get("employer") or ""
-    url = raw.get("url") or raw.get("jobUrl") or raw.get("link") or ""
-    location = raw.get("location") or raw.get("jobLocation") or ""
-    jd = raw.get("description") or raw.get("jobDescription") or raw.get("content") or ""
+    title = (raw.get("title") or raw.get("jobTitle") or raw.get("position") or "").strip()
+    company = (raw.get("company") or raw.get("companyName") or raw.get("employer") or 
+               raw.get("companyDetails", {}).get("name") or "").strip()
+    url = (raw.get("url") or raw.get("jobUrl") or raw.get("link") or 
+           raw.get("applyUrl") or "").strip()
+    location = (raw.get("location") or raw.get("jobLocation") or "").strip()
+    jd = (raw.get("description") or raw.get("jobDescription") or raw.get("content") or "").strip()
     
     if not title or not company or not url:
         return None
@@ -192,7 +201,7 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
         "platform": platform,
         "job_url": url[:1000],
         "jd_text": jd[:5000],
-        "posted_date": raw.get("postedDate") or raw.get("date") or "",
+        "posted_date": str(raw.get("postedDate") or raw.get("date") or ""),
         "analysis_done": False,
         "status": "new",
     }
@@ -268,13 +277,6 @@ def run_scrape():
         print(f"LinkedIn: {len(linkedin_jobs)} raw results")
     except Exception as e:
         print(f"LinkedIn scrape failed: {e}")
-    
-    try:
-        naukri_jobs = scrape_naukri_jobs()
-        all_raw.extend([(j, "naukri") for j in naukri_jobs])
-        print(f"Naukri: {len(naukri_jobs)} raw results")
-    except Exception as e:
-        print(f"Naukri scrape failed: {e}")
     
     # Normalize + deduplicate
     new_jobs = []
