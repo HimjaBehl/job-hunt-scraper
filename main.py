@@ -209,15 +209,10 @@ def scrape_linkedin_jobs() -> list[dict]:
     return results
 
 LINKEDIN_POST_SOURCES = [
-    # Founders Office Fellowship page
-    "https://www.linkedin.com/company/founders-office-fellowship/posts/?feedView=all",
-    # Yash Chitransh - runs hiring posts for founder's office roles
-    "https://www.linkedin.com/in/yash-chitransh/recent-activity/all/",
-    # Common founder's office hiring hashtags
-    "https://www.linkedin.com/search/results/content/?keywords=hiring%20founder%27s%20office&datePosted=%22past-week%22",
-    "https://www.linkedin.com/search/results/content/?keywords=hiring%20chief%20of%20staff%20startup&datePosted=%22past-week%22",
-    "https://www.linkedin.com/search/results/content/?keywords=%22founder%27s%20office%22%20%22we%27re%20hiring%22&datePosted=%22past-week%22",
-    "https://www.linkedin.com/search/results/content/?keywords=%22founders+office%22+hiring+bangalore&datePosted=%22past-week%22",
+    # Yash Chitransh - posts founder's office hiring regularly
+    "https://www.linkedin.com/in/yash-chitransh/",
+    # Founders Office Fellowship company page
+    "https://www.linkedin.com/company/founders-office-fellowship/",
 ]
 
 def scrape_linkedin_posts() -> list[dict]:
@@ -225,38 +220,45 @@ def scrape_linkedin_posts() -> list[dict]:
     print("Scraping LinkedIn posts...")
     
     results = run_apify_actor(
-        "curious_coder~linkedin-post-search-scraper",
+        "harvestapi~linkedin-profile-posts",
         {
-            "urls": LINKEDIN_POST_SOURCES,
-            "maxPosts": 50,
-            "proxy": {"useApifyProxy": True},
+            "targetUrls": LINKEDIN_POST_SOURCES,
+            "maxPosts": 30,
+            "includeQuotePosts": True,
+            "includeReposts": True,
+            "scrapeReactions": False,
+            "scrapeComments": False,
         }
     )
     
     if not results:
-        print("  No posts found or actor unavailable")
+        print("  No posts found")
         return []
     
     print(f"  Got {len(results)} posts, extracting job listings...")
     jobs = []
     for post in results:
-        text = post.get("text") or post.get("commentary") or post.get("content") or ""
+        text = (post.get("text") or post.get("commentary") or 
+                post.get("content") or post.get("description") or "")
         if not text or len(text) < 50:
             continue
         # Only process posts that look like hiring posts
-        hiring_signals = ["hiring", "we're looking", "join us", "open role", 
-                         "founder's office", "chief of staff", "generalist"]
+        hiring_signals = ["hiring", "we're looking", "looking for", "join us", 
+                         "open role", "founder's office", "chief of staff", 
+                         "generalist", "apply", "dm me", "reach out"]
         if not any(s in text.lower() for s in hiring_signals):
             continue
         
-        extracted = extract_job_from_post(text, post)
+        post_url = (post.get("url") or post.get("postUrl") or 
+                   post.get("link") or post.get("shareUrl") or "")
+        extracted = extract_job_from_post(text, post_url)
         if extracted:
             jobs.append(extracted)
     
     print(f"  Extracted {len(jobs)} job listings from posts")
     return jobs
 
-def extract_job_from_post(text: str, post: dict) -> dict | None:
+def extract_job_from_post(text: str, post_url: str = "") -> dict | None:
     """Use Claude to extract structured job data from a LinkedIn post."""
     prompt = f"""Extract job listing details from this LinkedIn post. 
 If this is NOT a job posting, return null.
@@ -270,7 +272,7 @@ If it IS a job posting, respond with ONLY this JSON (no markdown):
   "company": "<company name>",
   "location": "<city, India or Remote>",
   "description": "<what the role involves, 2-3 sentences>",
-  "url": "<any application link or LinkedIn post URL if no link>",
+  "url": "<any application link mentioned, or leave empty>",
   "is_job_post": true
 }}
 
@@ -290,14 +292,13 @@ If NOT a job post, respond with exactly: {{"is_job_post": false}}"""
     try:
         r = httpx.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
         data = r.json()
+        if "error" in data:
+            return None
         text_out = data["content"][0]["text"].strip().replace("```json","").replace("```","")
         parsed = json.loads(text_out)
         
         if not parsed.get("is_job_post"):
             return None
-        
-        # Use post URL as fallback
-        post_url = post.get("url") or post.get("postUrl") or post.get("link") or ""
         
         return {
             "title": parsed.get("title", "Unknown Role"),
