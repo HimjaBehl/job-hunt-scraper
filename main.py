@@ -66,15 +66,19 @@ def supabase_insert(records: list[dict]) -> dict:
     r = httpx.post(url, headers=headers, json=records, timeout=30)
     return r.json() if r.text else {}
 
-def supabase_get_existing_urls() -> set:
-    url = f"{SUPABASE_URL}/rest/v1/jobs?select=job_url"
+def supabase_get_existing_jobs() -> set:
+    """Get set of (title, company) tuples already in DB to deduplicate."""
+    url = f"{SUPABASE_URL}/rest/v1/jobs?select=job_url,title,company"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
     r = httpx.get(url, headers=headers, timeout=30)
     data = r.json()
-    return {row["job_url"] for row in data if row.get("job_url")}
+    existing_urls = {row["job_url"] for row in data if row.get("job_url")}
+    existing_pairs = {(row["title"].lower().strip(), row["company"].lower().strip()) 
+                     for row in data if row.get("title") and row.get("company")}
+    return existing_urls, existing_pairs
 
 def supabase_update(job_id: str, data: dict):
     url = f"{SUPABASE_URL}/rest/v1/jobs?id=eq.{job_id}"
@@ -204,25 +208,133 @@ def scrape_linkedin_jobs() -> list[dict]:
     print(f"  Got {len(results)} raw results")
     return results
 
-def scrape_naukri_jobs() -> list[dict]:
-    """Scrape Naukri jobs using Apify."""
-    print("Scraping Naukri...")
+LINKEDIN_POST_SOURCES = [
+    # Founders Office Fellowship page
+    "https://www.linkedin.com/company/founders-office-fellowship/posts/?feedView=all",
+    # Yash Chitransh - runs hiring posts for founder's office roles
+    "https://www.linkedin.com/in/yash-chitransh/recent-activity/all/",
+    # Common founder's office hiring hashtags
+    "https://www.linkedin.com/search/results/content/?keywords=hiring%20founder%27s%20office&datePosted=%22past-week%22",
+    "https://www.linkedin.com/search/results/content/?keywords=hiring%20chief%20of%20staff%20startup&datePosted=%22past-week%22",
+    "https://www.linkedin.com/search/results/content/?keywords=%22founder%27s%20office%22%20%22we%27re%20hiring%22&datePosted=%22past-week%22",
+    "https://www.linkedin.com/search/results/content/?keywords=%22founders+office%22+hiring+bangalore&datePosted=%22past-week%22",
+]
+
+def scrape_linkedin_posts() -> list[dict]:
+    """Scrape LinkedIn posts from founder's office communities and extract job listings."""
+    print("Scraping LinkedIn posts...")
+    
     results = run_apify_actor(
-        "curious_coder~naukri-scraper",
+        "curious_coder~linkedin-post-search-scraper",
         {
-            "searchQueries": [
-                "founder office generalist",
-                "chief of staff startup",
-                "CEO office generalist",
-            ],
-            "locations": ["Bangalore", "Mumbai", "Delhi"],
-            "maxResults": 30,
+            "urls": LINKEDIN_POST_SOURCES,
+            "maxPosts": 50,
+            "proxy": {"useApifyProxy": True},
         }
     )
-    return results
+    
+    if not results:
+        print("  No posts found or actor unavailable")
+        return []
+    
+    print(f"  Got {len(results)} posts, extracting job listings...")
+    jobs = []
+    for post in results:
+        text = post.get("text") or post.get("commentary") or post.get("content") or ""
+        if not text or len(text) < 50:
+            continue
+        # Only process posts that look like hiring posts
+        hiring_signals = ["hiring", "we're looking", "join us", "open role", 
+                         "founder's office", "chief of staff", "generalist"]
+        if not any(s in text.lower() for s in hiring_signals):
+            continue
+        
+        extracted = extract_job_from_post(text, post)
+        if extracted:
+            jobs.append(extracted)
+    
+    print(f"  Extracted {len(jobs)} job listings from posts")
+    return jobs
+
+def extract_job_from_post(text: str, post: dict) -> dict | None:
+    """Use Claude to extract structured job data from a LinkedIn post."""
+    prompt = f"""Extract job listing details from this LinkedIn post. 
+If this is NOT a job posting, return null.
+
+POST:
+{text[:2000]}
+
+If it IS a job posting, respond with ONLY this JSON (no markdown):
+{{
+  "title": "<job title>",
+  "company": "<company name>",
+  "location": "<city, India or Remote>",
+  "description": "<what the role involves, 2-3 sentences>",
+  "url": "<any application link or LinkedIn post URL if no link>",
+  "is_job_post": true
+}}
+
+If NOT a job post, respond with exactly: {{"is_job_post": false}}"""
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 300,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    
+    try:
+        r = httpx.post("https://api.anthropic.com/v1/messages", headers=headers, json=body, timeout=30)
+        data = r.json()
+        text_out = data["content"][0]["text"].strip().replace("```json","").replace("```","")
+        parsed = json.loads(text_out)
+        
+        if not parsed.get("is_job_post"):
+            return None
+        
+        # Use post URL as fallback
+        post_url = post.get("url") or post.get("postUrl") or post.get("link") or ""
+        
+        return {
+            "title": parsed.get("title", "Unknown Role"),
+            "company": parsed.get("company", "Unknown"),
+            "location": parsed.get("location", "India"),
+            "description": parsed.get("description", ""),
+            "url": parsed.get("url") or post_url,
+            "source": "linkedin-post",
+        }
+    except:
+        return None
 
 def normalize_job(raw: dict, platform: str) -> dict | None:
     """Normalize raw job data from any platform into our schema."""
+    # Handle post-extracted jobs (already structured by Claude)
+    if raw.get("source") == "linkedin-post":
+        title = raw.get("title", "").strip()
+        company = raw.get("company", "").strip()
+        url = raw.get("url", "").strip()
+        if not title or not company:
+            return None
+        title_lower = title.lower()
+        if any(blocked in title_lower for blocked in BLOCKED_TITLE_KEYWORDS):
+            return None
+        return {
+            "title": title[:500],
+            "company": company[:200],
+            "location": raw.get("location", "")[:200],
+            "platform": "linkedin-post",
+            "job_url": url[:1000] or f"post-{hash(title+company)}",
+            "jd_text": raw.get("description", "")[:5000],
+            "posted_date": "",
+            "analysis_done": False,
+            "status": "new",
+        }
+
+    # Standard job listing
     title = (raw.get("title") or raw.get("jobTitle") or raw.get("position") or "").strip()
     company = (raw.get("company") or raw.get("companyName") or raw.get("employer") or 
                raw.get("companyDetails", {}).get("name") or "").strip()
@@ -238,10 +350,21 @@ def normalize_job(raw: dict, platform: str) -> dict | None:
     if not title or not company or not url:
         return None
     
-    # Block irrelevant role types
     title_lower = title.lower()
     if any(blocked in title_lower for blocked in BLOCKED_TITLE_KEYWORDS):
         return None
+    
+    return {
+        "title": title[:500],
+        "company": company[:200],
+        "location": location[:200],
+        "platform": platform,
+        "job_url": url[:1000],
+        "jd_text": jd[:5000],
+        "posted_date": str(raw.get("postedDate") or raw.get("date") or ""),
+        "analysis_done": False,
+        "status": "new",
+    }
     
     return {
         "title": title[:500],
@@ -338,7 +461,7 @@ def run_scrape():
     print(f"Job Hunt Agent — Scrape Run: {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*50}")
     
-    existing_urls = supabase_get_existing_urls()
+    existing_urls, existing_pairs = supabase_get_existing_jobs()
     print(f"Already have {len(existing_urls)} jobs in DB")
     
     all_raw = []
@@ -349,14 +472,26 @@ def run_scrape():
         print(f"LinkedIn: {len(linkedin_jobs)} raw results")
     except Exception as e:
         print(f"LinkedIn scrape failed: {e}")
+
+    try:
+        post_jobs = scrape_linkedin_posts()
+        all_raw.extend([(j, "linkedin-posts") for j in post_jobs])
+        print(f"LinkedIn posts: {len(post_jobs)} raw results")
+    except Exception as e:
+        print(f"LinkedIn posts scrape failed: {e}")
     
-    # Normalize + deduplicate
+    # Normalize + deduplicate by URL and title+company
     new_jobs = []
     for raw, platform in all_raw:
         normalized = normalize_job(raw, platform)
-        if normalized and normalized["job_url"] not in existing_urls:
+        if not normalized:
+            continue
+        url = normalized["job_url"]
+        pair = (normalized["title"].lower().strip(), normalized["company"].lower().strip())
+        if url not in existing_urls and pair not in existing_pairs:
             new_jobs.append(normalized)
-            existing_urls.add(normalized["job_url"])
+            existing_urls.add(url)
+            existing_pairs.add(pair)
     
     print(f"\nNew jobs to insert: {len(new_jobs)}")
     
